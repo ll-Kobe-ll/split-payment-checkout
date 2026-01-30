@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+admin/node_modules/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Build outputs
+admin/dist/
+admin/build/
+widget/dist/
+*.min.js
+*.min.css
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Database
+*.sqlite
+*.db
+
+# Temporary files
+tmp/
+temp/
+.cache/
+
+# Your secret sauce
+.cursorrules
+ARCHITECTURE.md
+NOTES.md
+docs/internal/
+
+# Any planning/strategy files
+*.plan
+*.strategy
+TODO.md
+ROADMAP.md
+SETUP_GUIDE.md

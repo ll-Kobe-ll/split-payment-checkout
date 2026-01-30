@@ -1,0 +1,954 @@
+# Split-Pay Checkout v1.0 - Cursor Build Instructions
+
+## PROJECT OVERVIEW
+You are building a Shopify app that allows customers to split a single order payment across 2-5 different credit/debit cards. This is NOT buy-now-pay-later. This is for situations like:
+- Couples splitting a purchase
+- Roommates sharing a household item
+- Friends going in on a gift
+- Using multiple cards to maximize rewards
+- Using remaining balances on prepaid/gift cards
+
+## TECH STACK (DO NOT DEVIATE)
+- **Runtime:** Node.js 20+ with Express.js
+- **Database:** PostgreSQL (use `pg` library, NOT an ORM)
+- **Payments:** Stripe API (PaymentIntents with manual capture)
+- **Platform:** Shopify App (App Bridge, Polaris, Session Tokens)
+- **Frontend Widget:** Vanilla JS + CSS (injected into Shopify checkout)
+- **Admin Dashboard:** React + Vite + Tailwind CSS
+- **Hosting Ready For:** Railway/Render/Fly.io
+
+## DIRECTORY STRUCTURE
+```
+split-pay-checkout/
+├── .env.example
+├── .gitignore
+├── package.json
+├── README.md
+├── railway.json (or render.yaml)
+│
+├── server/
+│   ├── index.js                    # Express app entry point
+│   ├── config/
+│   │   ├── database.js             # PostgreSQL connection pool
+│   │   ├── stripe.js               # Stripe client initialization
+│   │   └── shopify.js              # Shopify API client setup
+│   │
+│   ├── middleware/
+│   │   ├── auth.js                 # Shopify session token verification
+│   │   ├── errorHandler.js         # Global error handler
+│   │   ├── validateWebhook.js      # Shopify webhook HMAC validation
+│   │   └── rateLimit.js            # Rate limiting for widget endpoints
+│   │
+│   ├── routes/
+│   │   ├── auth.js                 # OAuth install/callback routes
+│   │   ├── webhooks.js             # Shopify webhook handlers
+│   │   ├── widget.js               # Public widget API endpoints
+│   │   ├── admin.js                # Admin dashboard API endpoints
+│   │   └── stripe.js               # Stripe webhook handlers
+│   │
+│   ├── services/
+│   │   ├── paymentService.js       # Core split payment logic
+│   │   ├── refundService.js        # Refund handling logic
+│   │   ├── orderService.js         # Shopify order creation
+│   │   └── storeService.js         # Store settings management
+│   │
+│   ├── utils/
+│   │   ├── logger.js               # Winston logger setup
+│   │   ├── currency.js             # Currency formatting helpers
+│   │   └── validation.js           # Input validation helpers
+│   │
+│   └── db/
+│       ├── migrations/
+│       │   └── 001_initial_schema.sql
+│       └── queries/
+│           ├── stores.js
+│           ├── transactions.js
+│           ├── payments.js
+│           └── refunds.js
+│
+├── widget/
+│   ├── split-pay-widget.js         # Main widget script (IIFE)
+│   ├── split-pay-widget.css        # Widget styles
+│   └── build.js                    # Simple build script for minification
+│
+├── admin/
+│   ├── package.json
+│   ├── vite.config.js
+│   ├── index.html
+│   ├── src/
+│   │   ├── main.jsx
+│   │   ├── App.jsx
+│   │   ├── api/
+│   │   │   └── client.js           # API client with auth
+│   │   ├── components/
+│   │   │   ├── Layout.jsx
+│   │   │   ├── TransactionTable.jsx
+│   │   │   ├── StoreStats.jsx
+│   │   │   └── RefundModal.jsx
+│   │   └── pages/
+│   │       ├── Dashboard.jsx
+│   │       ├── Transactions.jsx
+│   │       └── Settings.jsx
+│   └── tailwind.config.js
+│
+└── scripts/
+    ├── migrate.js                  # Database migration runner
+    └── seed.js                     # Test data seeder
+```
+
+---
+
+## DATABASE SCHEMA
+
+### PostgreSQL Schema (server/db/migrations/001_initial_schema.sql)
+
+```sql
+-- Stores table: Tracks installed Shopify stores
+CREATE TABLE stores (
+    id SERIAL PRIMARY KEY,
+    shop_domain VARCHAR(255) UNIQUE NOT NULL,      -- e.g., "mystore.myshopify.com"
+    access_token TEXT NOT NULL,                     -- Encrypted Shopify access token
+    stripe_account_id VARCHAR(255),                 -- If using Stripe Connect (future)
+    is_active BOOLEAN DEFAULT true,
+    settings JSONB DEFAULT '{}',                    -- Store-specific settings
+    installed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    uninstalled_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Transactions table: One row per checkout attempt
+CREATE TABLE transactions (
+    id SERIAL PRIMARY KEY,
+    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+    shopify_checkout_token VARCHAR(255),           -- Shopify checkout token
+    shopify_order_id VARCHAR(255),                 -- Created after successful payment
+    shopify_order_number VARCHAR(50),              -- Human-readable order number
+    
+    -- Amounts (all in cents to avoid floating point)
+    total_amount INTEGER NOT NULL,                 -- Total order amount in cents
+    currency VARCHAR(3) DEFAULT 'USD',
+    
+    -- Status tracking
+    status VARCHAR(50) DEFAULT 'pending',          -- pending, processing, completed, failed, refunded, partially_refunded
+    failure_reason TEXT,                           -- If failed, why
+    
+    -- Metadata
+    customer_email VARCHAR(255),
+    customer_ip VARCHAR(45),                       -- IPv6 compatible
+    user_agent TEXT,
+    
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP
+);
+
+-- Payments table: Individual card payments within a transaction (2-5 per transaction)
+CREATE TABLE payments (
+    id SERIAL PRIMARY KEY,
+    transaction_id INTEGER REFERENCES transactions(id) ON DELETE CASCADE,
+    
+    -- Stripe data
+    stripe_payment_intent_id VARCHAR(255) UNIQUE NOT NULL,
+    stripe_payment_method_id VARCHAR(255),
+    
+    -- Amount for this specific card
+    amount INTEGER NOT NULL,                       -- Amount in cents
+    
+    -- Card details (for display, NOT full card numbers)
+    card_brand VARCHAR(50),                        -- visa, mastercard, amex, etc.
+    card_last_four VARCHAR(4),
+    card_exp_month INTEGER,
+    card_exp_year INTEGER,
+    
+    -- Status
+    status VARCHAR(50) DEFAULT 'pending',          -- pending, authorized, captured, failed, voided, refunded
+    failure_code VARCHAR(100),
+    failure_message TEXT,
+    
+    -- Capture tracking
+    authorized_at TIMESTAMP,
+    captured_at TIMESTAMP,
+    voided_at TIMESTAMP,
+    
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Refunds table: Track all refunds
+CREATE TABLE refunds (
+    id SERIAL PRIMARY KEY,
+    transaction_id INTEGER REFERENCES transactions(id) ON DELETE CASCADE,
+    payment_id INTEGER REFERENCES payments(id) ON DELETE CASCADE,
+    
+    stripe_refund_id VARCHAR(255) UNIQUE NOT NULL,
+    amount INTEGER NOT NULL,                       -- Refund amount in cents
+    reason VARCHAR(255),                           -- duplicate, fraudulent, requested_by_customer
+    
+    status VARCHAR(50) DEFAULT 'pending',          -- pending, succeeded, failed
+    failure_reason TEXT,
+    
+    initiated_by VARCHAR(50),                      -- admin, webhook, automatic
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Indexes for performance
+CREATE INDEX idx_transactions_store_id ON transactions(store_id);
+CREATE INDEX idx_transactions_status ON transactions(status);
+CREATE INDEX idx_transactions_created_at ON transactions(created_at DESC);
+CREATE INDEX idx_transactions_shopify_order_id ON transactions(shopify_order_id);
+CREATE INDEX idx_payments_transaction_id ON payments(transaction_id);
+CREATE INDEX idx_payments_stripe_pi ON payments(stripe_payment_intent_id);
+CREATE INDEX idx_payments_status ON payments(status);
+CREATE INDEX idx_refunds_transaction_id ON refunds(transaction_id);
+CREATE INDEX idx_stores_shop_domain ON stores(shop_domain);
+
+-- Update timestamp trigger
+CREATE OR REPLACE FUNCTION update_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER stores_updated_at BEFORE UPDATE ON stores
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER transactions_updated_at BEFORE UPDATE ON transactions
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER payments_updated_at BEFORE UPDATE ON payments
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+```
+
+---
+
+## CORE PAYMENT FLOW LOGIC
+
+### The Critical Flow (server/services/paymentService.js)
+
+This is the most important part of the entire app. Get this right.
+
+```
+CUSTOMER FLOW:
+1. Customer at checkout clicks "Split Payment"
+2. Widget appears, shows total: $500.00
+3. Customer adds Card A: enters card, specifies $300
+4. Balance updates: $200.00 remaining
+5. Customer adds Card B: enters card, specifies $200  
+6. Balance shows: $0.00 - ready to pay
+7. Customer clicks "Complete Purchase"
+8. Backend receives all payment methods + amounts
+
+BACKEND FLOW:
+1. Validate total amounts equal cart total (CRITICAL)
+2. Create PaymentIntent for each card with capture_method: 'manual'
+3. Confirm all PaymentIntents (this AUTHORIZES but doesn't CAPTURE)
+4. If ALL authorizations succeed:
+   - Capture all PaymentIntents
+   - Create Shopify order
+   - Return success
+5. If ANY authorization fails:
+   - Cancel/void all successful authorizations
+   - Return which card failed
+   - DO NOT create Shopify order
+```
+
+### Edge Cases to Handle
+
+```javascript
+// EDGE CASE 1: Amount validation
+// User tries to pay more than total
+// User tries to pay less than total
+// User enters negative amount
+// User enters $0 for a card
+// SOLUTION: Validate on frontend AND backend. Backend is source of truth.
+
+// EDGE CASE 2: Race condition on capture
+// Authorization succeeds, but capture fails (rare but possible)
+// SOLUTION: Use database transactions. Mark TX as "capturing". 
+// If any capture fails, void all. Never leave in partial state.
+
+// EDGE CASE 3: Duplicate submissions
+// User double-clicks submit button
+// SOLUTION: Generate idempotency key on frontend, pass to backend.
+// Check if transaction with that key exists before processing.
+
+// EDGE CASE 4: Card declined after first card authorized
+// Card A: $300 authorized ✓
+// Card B: $200 declined ✗
+// SOLUTION: Must void Card A's authorization immediately.
+// Return error: "Card ending in XXXX was declined"
+
+// EDGE CASE 5: Partial amount on last card
+// Total: $500, Card A: $300, Card B only has $150 available
+// SOLUTION: Decline entire transaction. We don't support partial completion.
+// User must adjust amounts or use different card.
+
+// EDGE CASE 6: Timeout during processing
+// Network issues, Stripe slow, etc.
+// SOLUTION: Set 30-second timeout. If exceeded, attempt to void all.
+// Mark transaction as "timeout" for manual review.
+
+// EDGE CASE 7: Currency mismatch
+// Store in USD, card in EUR
+// SOLUTION: All payments processed in store's currency.
+// Stripe handles conversion. We don't support multi-currency split.
+
+// EDGE CASE 8: 3D Secure / SCA required
+// European cards may require additional authentication
+// SOLUTION: Use Stripe's handleCardAction on frontend if required.
+// Payment flow becomes async. Handle requires_action status.
+
+// EDGE CASE 9: Minimum charge amounts
+// Stripe minimum is $0.50 USD
+// SOLUTION: Enforce minimum $1.00 per card to be safe.
+// Frontend prevents amounts under $1.00.
+
+// EDGE CASE 10: Refund on split payment
+// Full refund: Refund each card proportionally
+// Partial refund: Refund proportionally based on original split
+// Example: $500 total, $300/$200 split, $100 refund = $60/$40 refund
+```
+
+---
+
+## API ENDPOINTS
+
+### Widget Public Endpoints (No auth required, rate limited)
+
+```
+POST /api/widget/init
+- Called when widget loads
+- Body: { shopDomain, checkoutToken }
+- Returns: { sessionId, totalAmount, currency, maxCards: 5, minAmount: 100 }
+
+POST /api/widget/create-payment-intent
+- Creates a PaymentIntent for a single card
+- Body: { sessionId, amount }
+- Returns: { clientSecret, paymentIntentId }
+- NOTE: capture_method: 'manual' - this only authorizes
+
+POST /api/widget/remove-payment
+- Cancels a pending PaymentIntent
+- Body: { sessionId, paymentIntentId }
+- Returns: { success: true }
+
+POST /api/widget/complete-checkout
+- The big one - processes all payments
+- Body: { sessionId, payments: [{ paymentIntentId, paymentMethodId }] }
+- Returns: { success: true, orderId, orderNumber } OR { success: false, failedCard, error }
+```
+
+### Admin Dashboard Endpoints (Shopify session token auth)
+
+```
+GET /api/admin/stats
+- Returns dashboard stats
+- Response: { totalTransactions, successRate, totalVolume, activeStores }
+
+GET /api/admin/transactions
+- Paginated transaction list
+- Query: ?page=1&limit=20&status=completed&startDate=2024-01-01
+- Response: { transactions: [...], total, page, pages }
+
+GET /api/admin/transactions/:id
+- Single transaction detail with all payments
+- Response: { transaction, payments, refunds }
+
+POST /api/admin/refund
+- Initiate manual refund
+- Body: { transactionId, amount, reason }
+- Response: { success, refunds: [...] }
+
+GET /api/admin/stores
+- List all installed stores
+- Response: { stores: [...] }
+
+PUT /api/admin/settings
+- Update store settings
+- Body: { maxCards, minAmount, enabledPaymentMethods }
+- Response: { settings }
+```
+
+### Webhook Endpoints
+
+```
+POST /api/webhooks/shopify
+- Handles: app/uninstalled, orders/refunded, checkouts/delete
+- Validates HMAC signature
+
+POST /api/webhooks/stripe
+- Handles: payment_intent.succeeded, payment_intent.payment_failed,
+           charge.refunded, charge.dispute.created
+- Validates Stripe signature
+```
+
+---
+
+## SHOPIFY APP CONFIGURATION
+
+### Required Scopes
+```
+read_checkouts
+write_checkouts
+read_orders
+write_orders
+read_products
+```
+
+### App URLs to Configure
+```
+App URL: https://your-app.railway.app
+Allowed redirection URL(s): https://your-app.railway.app/api/auth/callback
+Privacy policy URL: https://your-app.railway.app/privacy
+GDPR endpoints:
+  - Customer data request: /api/webhooks/gdpr/customers/data_request
+  - Customer redact: /api/webhooks/gdpr/customers/redact
+  - Shop redact: /api/webhooks/gdpr/shop/redact
+```
+
+### Webhook Subscriptions
+```
+topics: 
+  - app/uninstalled
+  - orders/create
+  - orders/refunded
+  - checkouts/delete
+```
+
+---
+
+## WIDGET IMPLEMENTATION DETAILS
+
+### Script Injection (Shopify Theme App Extension or Script Tag)
+
+The widget must:
+1. Hide/modify the default payment section at checkout
+2. Inject our custom split-pay UI
+3. Communicate with our backend via fetch
+4. Use Stripe.js for secure card tokenization
+5. Handle the entire payment flow before allowing checkout completion
+
+```javascript
+// Widget initialization pseudo-code
+class SplitPayWidget {
+    constructor(config) {
+        this.shopDomain = config.shopDomain;
+        this.checkoutToken = config.checkoutToken;
+        this.totalAmount = config.totalAmount;
+        this.payments = []; // Array of { amount, paymentIntentId, clientSecret, card }
+        this.stripe = Stripe(config.stripePublicKey);
+        this.elements = null;
+    }
+
+    // Calculate remaining balance
+    getRemainingBalance() {
+        const paid = this.payments.reduce((sum, p) => sum + p.amount, 0);
+        return this.totalAmount - paid;
+    }
+
+    // Add a new payment method
+    async addPaymentMethod(amount) {
+        // Validation
+        if (amount < 100) throw new Error('Minimum $1.00 per card');
+        if (amount > this.getRemainingBalance()) throw new Error('Amount exceeds remaining balance');
+        if (this.payments.length >= 5) throw new Error('Maximum 5 cards allowed');
+
+        // Create PaymentIntent on backend
+        const response = await fetch('/api/widget/create-payment-intent', {
+            method: 'POST',
+            body: JSON.stringify({ sessionId: this.sessionId, amount })
+        });
+        const { clientSecret, paymentIntentId } = await response.json();
+
+        // Store for later
+        this.payments.push({ amount, paymentIntentId, clientSecret, card: null });
+        
+        return { clientSecret, paymentIntentId };
+    }
+
+    // Complete checkout - the critical method
+    async completeCheckout() {
+        // Validate balance is exactly zero
+        if (this.getRemainingBalance() !== 0) {
+            throw new Error('Total must equal exactly $' + (this.totalAmount / 100));
+        }
+
+        // Confirm all PaymentIntents (attach payment methods)
+        const confirmPromises = this.payments.map(async (payment) => {
+            const result = await this.stripe.confirmCardPayment(payment.clientSecret, {
+                payment_method: payment.paymentMethodId
+            });
+            if (result.error) {
+                throw { card: payment.card, error: result.error };
+            }
+            return result;
+        });
+
+        try {
+            await Promise.all(confirmPromises);
+        } catch (err) {
+            // One card failed - backend will handle voiding others
+            throw err;
+        }
+
+        // All confirmed - tell backend to capture and create order
+        const response = await fetch('/api/widget/complete-checkout', {
+            method: 'POST',
+            body: JSON.stringify({
+                sessionId: this.sessionId,
+                payments: this.payments.map(p => ({
+                    paymentIntentId: p.paymentIntentId,
+                    paymentMethodId: p.paymentMethodId
+                }))
+            })
+        });
+
+        return response.json();
+    }
+}
+```
+
+### Widget UI States
+
+```
+STATE: INITIAL
+- Shows "Split your payment across multiple cards"
+- "Add Payment Method" button
+- Total amount displayed
+
+STATE: ADDING_CARD
+- Stripe card element visible
+- Amount input field
+- "Add This Card" button
+- Remaining balance displayed
+
+STATE: CARDS_ADDED
+- List of added cards (brand + last 4 + amount)
+- Remove button for each card
+- Running balance
+- "Add Another Card" button (if balance > 0 and cards < 5)
+- "Complete Purchase" button (only if balance = 0)
+
+STATE: PROCESSING
+- Spinner/loading state
+- "Processing payment 1 of 3..."
+- All inputs disabled
+
+STATE: SUCCESS
+- Checkmark
+- "Payment successful! Order #12345"
+- Redirect to thank you page
+
+STATE: ERROR
+- Error message: "Card ending in 4242 was declined"
+- "Try Again" button
+- Cards list still visible for editing
+```
+
+---
+
+## STRIPE INTEGRATION SPECIFICS
+
+### PaymentIntent Creation (Backend)
+
+```javascript
+// IMPORTANT: Always use manual capture for split payments
+const paymentIntent = await stripe.paymentIntents.create({
+    amount: amountInCents,
+    currency: 'usd',
+    capture_method: 'manual',  // CRITICAL - authorize only
+    metadata: {
+        transactionId: transaction.id,
+        shopDomain: store.shop_domain,
+        splitPayment: 'true',
+        cardIndex: index,
+        totalCards: totalCards
+    },
+    // Optional: Add statement descriptor
+    statement_descriptor_suffix: 'SPLITPAY'
+});
+```
+
+### Capture vs Authorize
+
+```
+AUTHORIZE (confirmCardPayment on frontend):
+- Verifies card is valid
+- Verifies funds available
+- Places hold on funds
+- Does NOT move money yet
+- Hold expires in ~7 days
+
+CAPTURE (stripe.paymentIntents.capture on backend):
+- Actually moves the money
+- Must happen after successful authorization
+- Can only capture up to authorized amount
+- Cannot capture after authorization expires
+```
+
+### Handling 3D Secure (SCA)
+
+```javascript
+// Frontend handling
+const result = await stripe.confirmCardPayment(clientSecret, {
+    payment_method: paymentMethodId
+});
+
+if (result.error) {
+    // Card error or declined
+    handleError(result.error);
+} else if (result.paymentIntent.status === 'requires_action') {
+    // 3D Secure required - Stripe will show modal automatically
+    // Wait for user to complete
+    // The promise won't resolve until they do
+} else if (result.paymentIntent.status === 'requires_capture') {
+    // Success! Card authorized, ready for capture
+}
+```
+
+### Voiding Authorizations
+
+```javascript
+// If any card fails, void all successful ones
+async function voidAuthorizations(paymentIntentIds) {
+    const results = await Promise.allSettled(
+        paymentIntentIds.map(id => 
+            stripe.paymentIntents.cancel(id)
+        )
+    );
+    
+    // Log any that failed to cancel (rare but track it)
+    results.forEach((result, i) => {
+        if (result.status === 'rejected') {
+            logger.error(`Failed to void PI ${paymentIntentIds[i]}`, result.reason);
+        }
+    });
+}
+```
+
+---
+
+## REFUND LOGIC
+
+### Proportional Refund Calculation
+
+```javascript
+function calculateRefundSplit(transaction, payments, refundAmount) {
+    // payments: array of { id, amount } for original charges
+    // refundAmount: total amount to refund in cents
+    
+    const totalPaid = payments.reduce((sum, p) => sum + p.amount, 0);
+    
+    // Calculate proportional refund for each card
+    const refunds = payments.map(payment => {
+        const proportion = payment.amount / totalPaid;
+        const refundForCard = Math.round(refundAmount * proportion);
+        return {
+            paymentId: payment.id,
+            stripePaymentIntentId: payment.stripe_payment_intent_id,
+            originalAmount: payment.amount,
+            refundAmount: refundForCard
+        };
+    });
+    
+    // Handle rounding - add/subtract penny from largest refund
+    const totalRefunds = refunds.reduce((sum, r) => sum + r.refundAmount, 0);
+    const difference = refundAmount - totalRefunds;
+    
+    if (difference !== 0) {
+        // Add difference to the largest refund
+        const largest = refunds.reduce((max, r) => 
+            r.refundAmount > max.refundAmount ? r : max
+        );
+        largest.refundAmount += difference;
+    }
+    
+    return refunds;
+}
+
+// Example:
+// Original: $500 split as $300 / $200
+// Refund $100
+// Card A refund: $100 * (300/500) = $60
+// Card B refund: $100 * (200/500) = $40
+```
+
+---
+
+## ENVIRONMENT VARIABLES
+
+### .env.example
+```bash
+# Server
+NODE_ENV=development
+PORT=3000
+APP_URL=http://localhost:3000
+
+# PostgreSQL
+DATABASE_URL=postgresql://user:password@localhost:5432/splitpay
+
+# Shopify
+SHOPIFY_API_KEY=your_api_key
+SHOPIFY_API_SECRET=your_api_secret
+SHOPIFY_SCOPES=read_checkouts,write_checkouts,read_orders,write_orders,read_products
+
+# Stripe
+STRIPE_SECRET_KEY=sk_test_xxx
+STRIPE_PUBLIC_KEY=pk_test_xxx
+STRIPE_WEBHOOK_SECRET=whsec_xxx
+
+# Security
+SESSION_SECRET=random_32_char_string_here
+ENCRYPTION_KEY=random_32_char_string_for_encrypting_tokens
+
+# Optional: Logging
+LOG_LEVEL=debug
+```
+
+---
+
+## ERROR HANDLING STANDARDS
+
+### Standard Error Response Format
+
+```javascript
+// All API errors return this format
+{
+    success: false,
+    error: {
+        code: 'CARD_DECLINED',           // Machine-readable code
+        message: 'Your card was declined', // Human-readable message
+        field: 'card_2',                   // Optional: which input caused error
+        details: {}                        // Optional: additional context
+    }
+}
+
+// Error codes to implement:
+const ERROR_CODES = {
+    // Payment errors
+    CARD_DECLINED: 'The card was declined',
+    INSUFFICIENT_FUNDS: 'Insufficient funds on card',
+    CARD_EXPIRED: 'The card has expired',
+    INVALID_CARD: 'Invalid card number',
+    PROCESSING_ERROR: 'Error processing payment',
+    
+    // Validation errors
+    AMOUNT_MISMATCH: 'Payment amounts must equal cart total',
+    AMOUNT_TOO_LOW: 'Minimum payment is $1.00',
+    TOO_MANY_CARDS: 'Maximum 5 cards allowed',
+    INVALID_SESSION: 'Session expired, please refresh',
+    
+    // System errors
+    STRIPE_ERROR: 'Payment processor error',
+    DATABASE_ERROR: 'System error, please try again',
+    TIMEOUT: 'Request timed out, please try again'
+};
+```
+
+### Logging Requirements
+
+```javascript
+// Log these events (use structured logging with Winston)
+// Level: INFO
+- Transaction created
+- Payment authorized
+- Payment captured  
+- Order created in Shopify
+- Refund processed
+
+// Level: WARN
+- Authorization voided (normal part of failed flow)
+- Retry attempted
+- Rate limit approached
+
+// Level: ERROR
+- Payment failed
+- Capture failed after authorization
+- Database error
+- Stripe API error
+- Webhook validation failed
+
+// Log format
+{
+    timestamp: '2024-01-15T10:30:00Z',
+    level: 'info',
+    message: 'Payment authorized',
+    transactionId: 123,
+    paymentIntentId: 'pi_xxx',
+    amount: 30000,
+    shopDomain: 'mystore.myshopify.com'
+}
+```
+
+---
+
+## SECURITY REQUIREMENTS
+
+### Must Implement
+
+1. **Input Validation**: Validate ALL inputs server-side
+   - Amounts must be positive integers (cents)
+   - Shop domains must match regex: `^[a-zA-Z0-9-]+\.myshopify\.com$`
+   - Checkout tokens must be alphanumeric
+
+2. **Rate Limiting**: 
+   - Widget endpoints: 60 requests/minute per IP
+   - Admin endpoints: 100 requests/minute per shop
+
+3. **Webhook Validation**:
+   - Shopify: Verify HMAC header
+   - Stripe: Verify stripe-signature header
+
+4. **Token Encryption**:
+   - Encrypt Shopify access tokens before storing in DB
+   - Use AES-256-GCM
+
+5. **CORS**:
+   - Widget endpoints: Allow only Shopify checkout domains
+   - Admin endpoints: Allow only your app domain
+
+6. **CSP Headers**:
+   - Set Content-Security-Policy for widget script
+
+---
+
+## TESTING CHECKLIST
+
+### Before Deploying to Production
+
+```
+[ ] Stripe test mode working
+[ ] Can install app on dev store
+[ ] Can split payment across 2 cards
+[ ] Can split payment across 5 cards
+[ ] Correct error when amounts don't match total
+[ ] Card decline voids other authorized cards
+[ ] 3D Secure flow works (use Stripe test card 4000002500003155)
+[ ] Order appears in Shopify after successful payment
+[ ] Full refund works (proportional)
+[ ] Partial refund works (proportional)
+[ ] App uninstall webhook cleans up data
+[ ] Admin dashboard shows transactions
+[ ] Rate limiting works
+[ ] Can handle $0.00 (free) checkouts gracefully (skip widget)
+```
+
+### Stripe Test Cards
+
+```
+Success: 4242424242424242
+Decline: 4000000000000002
+Insufficient funds: 4000000000009995
+3D Secure required: 4000002500003155
+Expired: 4000000000000069
+Processing error: 4000000000000119
+```
+
+---
+
+## DEPLOYMENT NOTES
+
+### Database Migrations
+
+Run migrations with:
+```bash
+npm run migrate
+```
+
+Migration script should:
+1. Check current schema version
+2. Run pending migrations in order
+3. Record migration in schema_versions table
+4. Rollback on failure
+
+### Environment-Specific Configs
+
+```javascript
+// Development
+- Use Stripe test keys
+- Verbose logging
+- Allow localhost CORS
+
+// Production  
+- Use Stripe live keys
+- Structured JSON logging
+- Strict CORS
+- Enable rate limiting
+- SSL only
+```
+
+---
+
+## FILES TO GENERATE (IN ORDER)
+
+1. package.json (root)
+2. .env.example
+3. .gitignore
+4. server/index.js
+5. server/config/database.js
+6. server/config/stripe.js
+7. server/config/shopify.js
+8. server/middleware/auth.js
+9. server/middleware/errorHandler.js
+10. server/middleware/validateWebhook.js
+11. server/middleware/rateLimit.js
+12. server/db/migrations/001_initial_schema.sql
+13. server/db/queries/stores.js
+14. server/db/queries/transactions.js
+15. server/db/queries/payments.js
+16. server/db/queries/refunds.js
+17. server/utils/logger.js
+18. server/utils/currency.js
+19. server/utils/validation.js
+20. server/services/paymentService.js
+21. server/services/refundService.js
+22. server/services/orderService.js
+23. server/services/storeService.js
+24. server/routes/auth.js
+25. server/routes/webhooks.js
+26. server/routes/widget.js
+27. server/routes/admin.js
+28. server/routes/stripe.js
+29. widget/split-pay-widget.js
+30. widget/split-pay-widget.css
+31. admin/package.json
+32. admin/vite.config.js
+33. admin/tailwind.config.js
+34. admin/index.html
+35. admin/src/main.jsx
+36. admin/src/App.jsx
+37. admin/src/api/client.js
+38. admin/src/components/Layout.jsx
+39. admin/src/components/TransactionTable.jsx
+40. admin/src/components/StoreStats.jsx
+41. admin/src/components/RefundModal.jsx
+42. admin/src/pages/Dashboard.jsx
+43. admin/src/pages/Transactions.jsx
+44. admin/src/pages/Settings.jsx
+45. scripts/migrate.js
+46. README.md
+47. railway.json
+
+---
+
+## IMPORTANT REMINDERS
+
+1. **NEVER store full card numbers** - Stripe handles all PCI compliance
+2. **Always validate amounts server-side** - Frontend validation is just UX
+3. **Use database transactions** for multi-step operations
+4. **Idempotency keys** prevent duplicate charges
+5. **Log everything** - You'll need it for debugging production issues
+6. **Test with real (test) cards** - Don't just mock Stripe
+7. **Handle webhooks idempotently** - They can be sent multiple times
+8. **Encrypt sensitive data** - Access tokens, especially
+
+---
+
+## NOW BUILD IT
+
+Generate all 47 files listed above. Each file should be complete, production-ready, and follow the patterns described in this document. Include comprehensive error handling, input validation, and logging.
+
+Start with package.json and work through the list in order.

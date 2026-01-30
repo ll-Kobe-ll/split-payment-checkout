@@ -1,0 +1,42 @@
+{
+  "name": "split-pay-checkout",
+  "version": "1.0.0",
+  "description": "Shopify app for splitting payments across multiple credit/debit cards",
+  "main": "server/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "migrate": "node scripts/migrate.js",
+    "seed": "node scripts/seed.js",
+    "build:widget": "node widget/build.js",
+    "build:admin": "cd admin && npm run build"
+  },
+  "keywords": [
+    "shopify",
+    "split-payment",
+    "checkout",
+    "stripe"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@shopify/shopify-api": "^9.0.0",
+    "express": "^4.18.2",
+    "pg": "^8.11.3",
+    "stripe": "^14.0.0",
+    "winston": "^3.11.0",
+    "express-rate-limit": "^7.1.5",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "crypto": "^1.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2",
+    "terser": "^5.26.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
+

@@ -1,0 +1,245 @@
+/**
+ * Split-Pay Widget Styles
+ */
+
+#split-pay-widget {
+  margin: 20px 0;
+  padding: 20px;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  background: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+}
+
+.split-pay-header {
+  margin-bottom: 20px;
+  padding-bottom: 15px;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.split-pay-header h3 {
+  margin: 0 0 10px 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: #333;
+}
+
+.split-pay-total {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 500;
+  color: #666;
+}
+
+.split-pay-cards {
+  margin-bottom: 20px;
+}
+
+.split-pay-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 15px;
+  margin-bottom: 10px;
+  background: #f8f9fa;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+}
+
+.split-pay-card-info {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  flex: 1;
+}
+
+.split-pay-card-brand {
+  font-weight: 600;
+  text-transform: capitalize;
+  color: #333;
+  min-width: 80px;
+}
+
+.split-pay-card-number {
+  font-family: 'Courier New', monospace;
+  color: #666;
+  font-size: 14px;
+}
+
+.split-pay-card-amount {
+  font-weight: 600;
+  color: #28a745;
+  margin-left: auto;
+}
+
+.split-pay-remove {
+  padding: 6px 12px;
+  background: #dc3545;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background 0.2s;
+}
+
+.split-pay-remove:hover {
+  background: #c82333;
+}
+
+.split-pay-remove:active {
+  background: #bd2130;
+}
+
+.split-pay-empty {
+  text-align: center;
+  padding: 20px;
+  color: #999;
+  font-style: italic;
+}
+
+.split-pay-balance {
+  margin: 20px 0;
+  padding: 15px;
+  background: #e7f3ff;
+  border: 1px solid #b3d9ff;
+  border-radius: 6px;
+  text-align: center;
+  font-size: 18px;
+  color: #0066cc;
+}
+
+.split-pay-balance strong {
+  font-weight: 600;
+}
+
+.split-pay-add-card {
+  margin-top: 20px;
+  padding: 20px;
+  background: #f8f9fa;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+}
+
+.split-pay-amount-input {
+  margin-bottom: 15px;
+}
+
+.split-pay-amount-input label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 500;
+  color: #333;
+}
+
+.split-pay-amount-input input {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 16px;
+  box-sizing: border-box;
+}
+
+.split-pay-amount-input input:focus {
+  outline: none;
+  border-color: #0066cc;
+  box-shadow: 0 0 0 2px rgba(0, 102, 204, 0.1);
+}
+
+.split-pay-card-element {
+  margin-bottom: 15px;
+  padding: 12px;
+  background: white;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.split-pay-add-button,
+.split-pay-complete-button {
+  width: 100%;
+  padding: 12px 24px;
+  background: #28a745;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.split-pay-add-button:hover:not(:disabled),
+.split-pay-complete-button:hover:not(:disabled) {
+  background: #218838;
+}
+
+.split-pay-add-button:active:not(:disabled),
+.split-pay-complete-button:active:not(:disabled) {
+  background: #1e7e34;
+}
+
+.split-pay-add-button:disabled,
+.split-pay-complete-button:disabled {
+  background: #6c757d;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.split-pay-complete-button {
+  margin-top: 20px;
+  background: #0066cc;
+}
+
+.split-pay-complete-button:hover:not(:disabled) {
+  background: #0052a3;
+}
+
+.split-pay-messages {
+  margin-top: 15px;
+  min-height: 30px;
+}
+
+.split-pay-error {
+  padding: 12px;
+  background: #f8d7da;
+  color: #721c24;
+  border: 1px solid #f5c6cb;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.split-pay-success {
+  padding: 12px;
+  background: #d4edda;
+  color: #155724;
+  border: 1px solid #c3e6cb;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  #split-pay-widget {
+    padding: 15px;
+  }
+
+  .split-pay-card {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .split-pay-card-info {
+    width: 100%;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .split-pay-remove {
+    width: 100%;
+  }
+}
+
